@@ -1,0 +1,38 @@
+[Unit]
+Description=Mercury Text Storage Server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=mercury
+Group=mercury
+ExecStart=/usr/local/bin/mercury
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/mercury
+WorkingDirectory=/var/lib/mercury
+
+# Network security
+PrivateNetwork=false
+RestrictAddressFamilies=AF_INET AF_INET6
+
+# Process security
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
