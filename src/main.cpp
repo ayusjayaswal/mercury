@@ -7,6 +7,8 @@
 #include <unistd.h>
 #include <signal.h>
 #include <ctime>
+#include <vector>
+#include <algorithm>
 
 class TextStorageServer {
 private:
@@ -18,7 +20,7 @@ private:
         time_t now = time(0);
         char* timestr = ctime(&now);
         std::string result(timestr);
-        result.pop_back(); // Remove newline
+        result.pop_back();
         return result;
     }
     
@@ -31,43 +33,137 @@ private:
         response << "\r\n";
         response << body;
         
-        send(client_fd, response.str().c_str(), response.str().length(), 0);
-    }
-    
-    void handle_get(int client_fd) {
-        send_response(client_fd, "200 OK", "text/plain", stored_data);
-        std::cout << "[" << get_timestamp() << "] GET request - Returned: " << stored_data << std::endl;
-    }
-    
-    void handle_post(int client_fd, const std::string& request) {
-        // Find Content-Length header
-        size_t content_length_pos = request.find("Content-Length:");
-        int content_length = 0;
+        std::string response_str = response.str();
+        size_t total_sent = 0;
+        size_t response_size = response_str.length();
         
-        if (content_length_pos != std::string::npos) {
-            size_t start = content_length_pos + 15; // Skip "Content-Length:"
+        // Send response in chunks to handle large data
+        while (total_sent < response_size) {
+            ssize_t sent = send(client_fd, response_str.c_str() + total_sent, 
+                              response_size - total_sent, 0);
+            if (sent <= 0) break;
+            total_sent += sent;
+        }
+    }
+    
+    std::string read_complete_request(int client_fd) {
+        std::string request;
+        std::vector<char> buffer(65536); // 64KB buffer
+        
+        // Read headers first
+        std::string headers;
+        while (true) {
+            ssize_t bytes_read = recv(client_fd, buffer.data(), buffer.size(), 0);
+            if (bytes_read <= 0) break;
+            
+            headers.append(buffer.data(), bytes_read);
+            size_t header_end = headers.find("\r\n\r\n");
+            if (header_end != std::string::npos) {
+                request = headers;
+                break;
+            }
+        }
+        
+        if (request.empty()) return request;
+        
+        // Check if this is a POST request
+        if (request.substr(0, 4) != "POST") {
+            return request; // GET/OPTIONS don't need body
+        }
+        
+        // Extract Content-Length
+        size_t content_length = 0;
+        size_t cl_pos = request.find("Content-Length:");
+        if (cl_pos != std::string::npos) {
+            size_t start = cl_pos + 15;
             size_t end = request.find("\r\n", start);
             if (end != std::string::npos) {
                 std::string length_str = request.substr(start, end - start);
                 // Trim whitespace
-                length_str.erase(0, length_str.find_first_not_of(" \t"));
-                length_str.erase(length_str.find_last_not_of(" \t") + 1);
-                content_length = std::stoi(length_str);
+                size_t first = length_str.find_first_not_of(" \t");
+                size_t last = length_str.find_last_not_of(" \t");
+                if (first != std::string::npos) {
+                    length_str = length_str.substr(first, last - first + 1);
+                    try {
+                        content_length = std::stoull(length_str);
+                    } catch (...) {
+                        content_length = 0;
+                    }
+                }
             }
         }
         
-        // Find the body (after double CRLF)
+        // Read the body if Content-Length is specified
+        if (content_length > 0) {
+            size_t header_end = request.find("\r\n\r\n") + 4;
+            size_t body_already_read = request.length() - header_end;
+            size_t remaining = content_length - body_already_read;
+            
+            // Reserve space for efficiency
+            request.reserve(header_end + content_length);
+            
+            // Read remaining body data
+            while (remaining > 0) {
+                size_t to_read = std::min(remaining, buffer.size());
+                ssize_t bytes_read = recv(client_fd, buffer.data(), to_read, 0);
+                if (bytes_read <= 0) break;
+                
+                request.append(buffer.data(), bytes_read);
+                remaining -= bytes_read;
+            }
+        }
+        
+        return request;
+    }
+    
+    void handle_get(int client_fd) {
+        send_response(client_fd, "200 OK", "text/plain; charset=utf-8", stored_data);
+        std::cout << "[" << get_timestamp() << "] GET - Returned " 
+                  << stored_data.length() << " characters" << std::endl;
+    }
+    
+    void handle_post(int client_fd, const std::string& request) {
+        // Find the start of the body
         size_t body_start = request.find("\r\n\r\n");
-        if (body_start != std::string::npos && content_length > 0) {
-            body_start += 4; // Skip the "\r\n\r\n"
-            stored_data = request.substr(body_start, content_length);
+        if (body_start != std::string::npos) {
+            body_start += 4; // Skip "\r\n\r\n"
+            
+            // Extract Content-Length to get exact body size
+            size_t content_length = 0;
+            size_t cl_pos = request.find("Content-Length:");
+            if (cl_pos != std::string::npos) {
+                size_t start = cl_pos + 15;
+                size_t end = request.find("\r\n", start);
+                if (end != std::string::npos) {
+                    std::string length_str = request.substr(start, end - start);
+                    size_t first = length_str.find_first_not_of(" \t");
+                    size_t last = length_str.find_last_not_of(" \t");
+                    if (first != std::string::npos) {
+                        length_str = length_str.substr(first, last - first + 1);
+                        try {
+                            content_length = std::stoull(length_str);
+                        } catch (...) {
+                            content_length = 0;
+                        }
+                    }
+                }
+            }
+            
+            if (content_length > 0) {
+                stored_data = request.substr(body_start, content_length);
+            } else {
+                // Fallback: take everything after headers
+                stored_data = request.substr(body_start);
+            }
         } else {
             stored_data = "";
         }
         
-        std::string response_body = "Data stored successfully: " + stored_data;
+        std::string response_body = "OK";
         send_response(client_fd, "200 OK", "text/plain", response_body);
-        std::cout << "[" << get_timestamp() << "] POST request - Stored: " << stored_data << std::endl;
+        
+        std::cout << "[" << get_timestamp() << "] POST - Stored " 
+                  << stored_data.length() << " characters" << std::endl;
     }
     
     void handle_options(int client_fd) {
@@ -79,7 +175,8 @@ private:
         response << "Content-Length: 0\r\n";
         response << "\r\n";
         
-        send(client_fd, response.str().c_str(), response.str().length(), 0);
+        std::string response_str = response.str();
+        send(client_fd, response_str.c_str(), response_str.length(), 0);
     }
     
 public:
@@ -93,13 +190,14 @@ public:
             return;
         }
         
-        // Set socket options
+        // Set socket options for large data handling
         int opt = 1;
-        if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
-            std::cerr << "Failed to set socket options" << std::endl;
-            close(server_fd);
-            return;
-        }
+        setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        
+        // Increase buffer sizes for large data
+        int buffer_size = 10 * 1024 * 1024; // 10MB
+        setsockopt(server_fd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size));
+        setsockopt(server_fd, SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size));
         
         struct sockaddr_in address;
         address.sin_family = AF_INET;
@@ -112,21 +210,19 @@ public:
             return;
         }
         
-        // Start listening
         if (listen(server_fd, 3) < 0) {
             std::cerr << "Failed to listen on socket" << std::endl;
             close(server_fd);
             return;
         }
         
-        std::cout << "Text Storage Server Started" << std::endl;
-        std::cout << "==================================================" << std::endl;
+        std::cout << "Unlimited Text Storage Server" << std::endl;
+        std::cout << "=====================================" << std::endl;
         std::cout << "Server running on port 9999" << std::endl;
-        std::cout << "Access via: http://localhost:9999" << std::endl;
-        std::cout << "POST text data to store it" << std::endl;
-        std::cout << "GET to retrieve stored data" << std::endl;
-        std::cout << "Press Ctrl+C to stop the server" << std::endl;
-        std::cout << "==================================================" << std::endl;
+        std::cout << "POST: Store unlimited size text data" << std::endl;
+        std::cout << "GET:  Retrieve stored data as-is" << std::endl;
+        std::cout << "Press Ctrl+C to stop" << std::endl;
+        std::cout << "=====================================" << std::endl;
         
         running = true;
         
@@ -142,14 +238,17 @@ public:
                 continue;
             }
             
-            // Read the request
-            char buffer[4096] = {0};
-            int bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
+            // Set generous timeouts for large data transfers
+            struct timeval timeout;
+            timeout.tv_sec = 300;  // 5 minutes
+            timeout.tv_usec = 0;
+            setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+            setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
             
-            if (bytes_read > 0) {
-                std::string request(buffer, bytes_read);
-                
-                // Parse HTTP method
+            // Read the complete request
+            std::string request = read_complete_request(client_fd);
+            
+            if (!request.empty()) {
                 if (request.substr(0, 3) == "GET") {
                     handle_get(client_fd);
                 } else if (request.substr(0, 4) == "POST") {
@@ -171,8 +270,8 @@ public:
             close(server_fd);
             server_fd = -1;
         }
-        std::cout << "\nShutting down server..." << std::endl;
-        std::cout << "Server stopped." << std::endl;
+        std::cout << "\nServer stopped. Final data size: " 
+                  << stored_data.length() << " characters" << std::endl;
     }
 };
 
