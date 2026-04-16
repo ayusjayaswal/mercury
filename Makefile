@@ -3,38 +3,37 @@ CXXFLAGS = -Wall -Wextra -std=c++11 -O2
 DEBUG_FLAGS = -g -DDEBUG
 
 TARGET = mercury
+BUILD_DIR = build
+BIN = $(BUILD_DIR)/$(TARGET)
 
 SOURCES = src/main.cpp
-
-BUILD_DIR = build
-
 OBJECTS = $(BUILD_DIR)/main.o
 
 SERVICE_FILE_SRC = systemd/$(TARGET).service
 SERVICE_FILE_DEST = /etc/systemd/system/$(TARGET).service
 
-all: $(BUILD_DIR) $(TARGET)
+all: $(BIN)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(TARGET): $(OBJECTS)
-	$(CXX) $(CXXFLAGS) -o $(BUILD_DIR)/$(TARGET) $(OBJECTS)
-	@echo "Build complete: $(BUILD_DIR)/$(TARGET)"
+$(BIN): $(BUILD_DIR) $(OBJECTS)
+	$(CXX) $(CXXFLAGS) -o $@ $(OBJECTS)
+	@echo "Build complete: $@"
 
-$(BUILD_DIR)/%.o: src/%.cpp
+$(BUILD_DIR)/%.o: src/%.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 debug: CXXFLAGS += $(DEBUG_FLAGS)
-debug: $(TARGET)
-	@echo "Debug build complete: $(BUILD_DIR)/$(TARGET)"
+debug: clean $(BIN)
+	@echo "Debug build complete: $(BIN)"
 
 clean:
 	rm -rf $(BUILD_DIR)
 	@echo "Clean complete"
 
-install: $(TARGET)
-	sudo cp $(BUILD_DIR)/$(TARGET) /usr/local/bin/
+install: $(BIN)
+	sudo cp $(BIN) /usr/local/bin/
 	@echo "Installed $(TARGET) to /usr/local/bin/"
 
 uninstall:
@@ -45,12 +44,12 @@ uninstall:
 	sudo systemctl daemon-reload
 	@echo "Uninstalled $(TARGET) and removed systemd service"
 
-run: $(TARGET)
-	./$(BUILD_DIR)/$(TARGET)
+run: $(BIN)
+	./$(BIN)
 
-test: $(TARGET)
+test: $(BIN)
 	@echo "Starting server in background..."
-	@./$(BUILD_DIR)/$(TARGET) &
+	@./$(BIN) &
 	@sleep 2
 	@echo "Testing POST request..."
 	@curl -X POST -d "Test message from makefile" http://localhost:9999
@@ -59,7 +58,7 @@ test: $(TARGET)
 	@curl http://localhost:9999
 	@echo ""
 	@echo "Stopping server..."
-	@pkill -f "./$(BUILD_DIR)/$(TARGET)"
+	@pkill -f "$(BIN)" || true
 	@echo "Test complete"
 
 setup-service: install
@@ -68,11 +67,11 @@ setup-service: install
 help:
 	@echo "Available targets:"
 	@echo "  all            - Build the server (default)"
-	@echo "  debug          - Build with debug symbols"
+	@echo "  debug          - Clean and build with debug symbols"
 	@echo "  clean          - Remove build artifacts"
 	@echo "  install        - Install to /usr/local/bin (requires sudo)"
 	@echo "  uninstall      - Remove binary and disable systemd service"
-	@echo "  setup-service  - Install and enable systemd service (requires sudo)"
+	@echo "  setup-service  - Install and enable systemd service"
 	@echo "  run            - Build and run the server"
 	@echo "  test           - Build and run automated tests"
 	@echo "  help           - Show this help message"
